@@ -3,6 +3,7 @@
 ## Notes: Tracks Wild Imp count and despawn timers for Demonology Warlock
 ## Author: Archxlock (via claude.ai and gemini.google.com)
 ## Version: 3.0.0
+## SavedVariables: WildImpTrackerDB
 ## DefaultState: Enabled
 ## SavedVariables: WildImpTrackerDB
 ## LoadSavedVariablesFirst: 1
