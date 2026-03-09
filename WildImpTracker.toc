@@ -1,8 +1,9 @@
 ## Interface: 120001
 ## Title: Wild Imp Tracker
-## Notes: Tracks Wild Imp count and despawn timers for Demonology Warlock
-## Author: Archxlock (via claude.ai + gemini.google.com+ OpenAI + Kalamazi)
-## Version: 6.0.9
+## Notes: Compact vertical imp tracker reskin for Demonology Warlock
+## Author: Archxlock (with a huge amount of help from Kalamazi and AI)
+## Version: 6.1
 ## SavedVariables: ImpTrackerReskinDBShortBars
+## OptionalDeps: Ace3
 
 WildImpTracker.lua

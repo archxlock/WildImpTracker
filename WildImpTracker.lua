@@ -1,13 +1,10 @@
--- Imp Tracker Reskin v6.2.0
--- Compact vertical-bar imp tracker for Demonology Warlock
--- Simulated imp tracker with support for:
---   * Hand of Gul'dan spawning 3 imps
---   * Imp Gang Boss talent (1250768)
---   * Implosion removing the 6 imps with the least remaining duration
---   * To Hell and Back talent (1281511) spawning boss imps from Implosion
---   * Bar fill representing remaining casts/fireballs instead of remaining duration
-
 local ADDON_NAME = ...
+
+local function IsDemonology()
+    local spec = GetSpecialization()
+    return spec == 2
+end
+
 
 local HAND_OF_GULDAN_SPELL_ID = 105174
 local IMPLOSION_SPELL_ID = 196277
@@ -17,9 +14,19 @@ local TO_HELL_AND_BACK_TALENT_ID = 1281511
 local IMP_DURATION = 40
 local START_ENERGY = 100
 local DECAY_BASE = 7.5
-local MAX_IMPS = 40
+local MAX_GROUPS = 20
 local MAX_CASTS_NORMAL = 6
 local MAX_CASTS_BOSS = 6
+
+local FRAME_BG_DEFAULT = { r = 0, g = 0, b = 0, a = 0.55 }
+local TOTAL_TEXT_DEFAULT = { r = 0.75, g = 0.85, b = 1.0, a = 1 }
+local LABEL_TEXT_DEFAULT = { r = 0.78, g = 0.88, b = 1.0, a = 1 }
+local TIMER_TEXT_DEFAULT = { r = 1, g = 1, b = 1, a = 1 }
+local CAST_TEXT_DEFAULT = { r = 1, g = 0.95, b = 0.85, a = 1 }
+local NORMAL_FILL_DEFAULT = { r = 0.15, g = 1.00, b = 0.18, a = 1 }
+local NORMAL_BORDER_DEFAULT = { r = 0.35, g = 0.85, b = 0.35, a = 1 }
+local BOSS_FILL_DEFAULT = { r = 1.00, g = 0.45, b = 0.00, a = 1 }
+local BOSS_BORDER_DEFAULT = { r = 1.00, g = 0.60, b = 0.10, a = 1 }
 
 local defaults = {
     x = 0,
@@ -27,15 +34,30 @@ local defaults = {
     scale = 1.0,
     alpha = 0.90,
     locked = false,
-    barWidth = 30,
-    barHeight = 60,
-    barGap = 2,
+    barWidth = 25,
+    barHeight = 56,
+    barGap = 1,
     anchor = "TOPLEFT",
     showBackground = true,
+
+    bgColor = FRAME_BG_DEFAULT,
+    totalTextColor = TOTAL_TEXT_DEFAULT,
+    labelTextColor = LABEL_TEXT_DEFAULT,
+    timerTextColor = TIMER_TEXT_DEFAULT,
+    castTextColor = CAST_TEXT_DEFAULT,
+    normalFillColor = NORMAL_FILL_DEFAULT,
+    normalBorderColor = NORMAL_BORDER_DEFAULT,
+    bossFillColor = BOSS_FILL_DEFAULT,
+    bossBorderColor = BOSS_BORDER_DEFAULT,
+
+    totalFontSize = 34,
+    timerFontSize = 15,
+    castFontSize = 12,
+    labelFontSize = 12,
 }
 
 local db
-local activeImps = {}
+local activeGroups = {}
 local displayOrder = {}
 local barFrames = {}
 local lastUpdate = GetTime()
@@ -55,13 +77,9 @@ local function EnsureDB()
     ImpTrackerReskinDBShortBars = ImpTrackerReskinDBShortBars or {}
     CopyDefaults(defaults, ImpTrackerReskinDBShortBars)
     db = ImpTrackerReskinDBShortBars
-    db.barHeight = 60
-    db.barWidth = 20
-    db.barGap = 2
-    db.barHeight = 60
-    db.barWidth = 20
-    db.barGap = 2
-    db.barHeight = 60
+    db.barHeight = db.barHeight or 56
+    db.barWidth = db.barWidth or 25
+    db.barGap = db.barGap or 2
 end
 
 local function IsSpellKnownSafe(spellID)
@@ -83,94 +101,105 @@ local function HasToHellAndBackTalent()
     return IsSpellKnownSafe(TO_HELL_AND_BACK_TALENT_ID)
 end
 
-local function RemainingTime(imp, now)
+local function RemainingTime(group, now)
     now = now or GetTime()
-    return math.max(0, IMP_DURATION - (now - imp.spawn))
+    return math.max(0, IMP_DURATION - (now - group.spawn))
 end
 
-local function GetMaxCasts(imp)
-    if imp and imp.isBoss then
+local function GetMaxCasts(group)
+    if group and group.isBoss then
         return MAX_CASTS_BOSS
     end
     return MAX_CASTS_NORMAL
 end
 
-local function RemainingCasts(imp)
-    local maxCasts = GetMaxCasts(imp)
-    local casts = math.ceil((imp.energy or 0) / (START_ENERGY / maxCasts))
+local function RemainingCasts(group)
+    local maxCasts = GetMaxCasts(group)
+    local casts = math.ceil((group.energy or 0) / (START_ENERGY / maxCasts))
     return math.max(0, math.min(maxCasts, casts))
 end
 
-local function AddImp(isBoss)
-    table.insert(activeImps, {
+local function AddGroup(count, isBoss)
+    if not count or count <= 0 then return end
+
+    table.insert(activeGroups, {
         spawn = GetTime(),
         energy = START_ENERGY,
+        count = count,
         isBoss = isBoss and true or false,
     })
-    while #activeImps > MAX_IMPS do
-        table.remove(activeImps, 1)
+
+    while #activeGroups > MAX_GROUPS do
+        table.remove(activeGroups, 1)
     end
 end
 
-local function AddHandOfGuldanImps()
-    local hasIGB = HasImpGangBossTalent()
-    local madeBoss = false
-
-    for _ = 1, 3 do
-        local isBoss = false
-        if hasIGB and not madeBoss then
-            isBoss = true
-            madeBoss = true
-        end
-        AddImp(isBoss)
-    end
+local function AddHandOfGuldanGroup()
+    AddGroup(3, false)
 end
 
-local function SortImpIndicesByRemainingDurationAscending(now)
+local function SortGroupIndicesByRemainingDurationAscending(now)
     wipe(displayOrder)
-    for i = 1, #activeImps do
+    for i = 1, #activeGroups do
         displayOrder[i] = i
     end
 
     table.sort(displayOrder, function(a, b)
-        local ra = RemainingTime(activeImps[a], now)
-        local rb = RemainingTime(activeImps[b], now)
+        local ra = RemainingTime(activeGroups[a], now)
+        local rb = RemainingTime(activeGroups[b], now)
         if math.abs(ra - rb) > 0.001 then
             return ra < rb
         end
-        return activeImps[a].spawn < activeImps[b].spawn
+        return activeGroups[a].spawn < activeGroups[b].spawn
     end)
 end
 
-local function ImplodeImps()
-    local now = GetTime()
-    SortImpIndicesByRemainingDurationAscending(now)
-
-    local toRemove = math.min(6, #displayOrder)
-    if toRemove <= 0 then
+local function ImplodeGroups()
+    local impsToRemove = 6
+    if impsToRemove <= 0 or #activeGroups == 0 then
         return
     end
 
-    local removeMap = {}
-    for n = 1, toRemove do
-        removeMap[displayOrder[n]] = true
-    end
+    local now = GetTime()
+    local totalRemoved = 0
+    SortGroupIndicesByRemainingDurationAscending(now)
 
-    for i = #activeImps, 1, -1 do
-        if removeMap[i] then
-            table.remove(activeImps, i)
+    for _, groupIndex in ipairs(displayOrder) do
+        local group = activeGroups[groupIndex]
+        if group and impsToRemove > 0 then
+            local removeCount = math.min(impsToRemove, group.count)
+            group.count = group.count - removeCount
+            impsToRemove = impsToRemove - removeCount
+            totalRemoved = totalRemoved + removeCount
+        end
+        if impsToRemove <= 0 then
+            break
         end
     end
 
-    if HasToHellAndBackTalent() then
-        local bossesToSpawn = math.floor(toRemove / 2)
-        for _ = 1, bossesToSpawn do
-            AddImp(true)
+    for i = #activeGroups, 1, -1 do
+        if activeGroups[i].count <= 0 then
+            table.remove(activeGroups, i)
+        end
+    end
+
+    if HasToHellAndBackTalent() and totalRemoved > 0 then
+        local bossCount = math.floor(totalRemoved / 2)
+        if bossCount > 0 then
+            AddGroup(bossCount, true)
         end
     end
 end
 
-local mainFrame = CreateFrame("Frame", "ImpTrackerReskinMainFrame", UIParent, "BackdropTemplate")
+local function GetTotalImpCount()
+    local total = 0
+    for i = 1, #activeGroups do
+        total = total + (activeGroups[i].count or 0)
+    end
+    return total
+end
+
+local mainFrame = CreateFrame("Frame", "WildImpTrackerMainFrame", UIParent, "BackdropTemplate")
 mainFrame:SetMovable(true)
 mainFrame:EnableMouse(true)
 mainFrame:SetClampedToScreen(true)
@@ -183,8 +212,16 @@ mainFrame:SetBackdrop({
     edgeSize = 8,
     insets = { left = 2, right = 2, top = 2, bottom = 2 },
 })
-mainFrame:SetBackdropColor(0, 0, 0, 0.55)
-mainFrame:SetBackdropBorderColor(0.45, 0.3, 0.8, 0.95)
+
+local function UpdateBackdrop()
+    if db.showBackground then
+        mainFrame:SetBackdropColor(db.bgColor.r, db.bgColor.g, db.bgColor.b, db.bgColor.a)
+        mainFrame:SetBackdropBorderColor(0.45, 0.3, 0.8, 0.95)
+    else
+        mainFrame:SetBackdropColor(0, 0, 0, 0)
+        mainFrame:SetBackdropBorderColor(0, 0, 0, 0)
+    end
+end
 
 local function SaveFramePosition()
     local left = mainFrame:GetLeft()
@@ -207,20 +244,16 @@ mainFrame:SetScript("OnDragStop", function(self)
     SaveFramePosition()
 end)
 
-
-
-
 local totalCountText = mainFrame:CreateFontString(nil, "OVERLAY")
 totalCountText:SetFont("Fonts\\FRIZQT__.TTF", 34, "OUTLINE")
 totalCountText:SetJustifyH("CENTER")
-totalCountText:SetTextColor(0.75, 0.85, 1.0)
 totalCountText:SetText("0")
 
 local totalLabel = mainFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
 totalLabel:SetText("Imps")
-totalLabel:SetTextColor(0.78, 0.88, 1)
 
 local barsAnchor = CreateFrame("Frame", nil, mainFrame)
+
 local function CreateBar(index)
     local f = CreateFrame("Frame", nil, barsAnchor, "BackdropTemplate")
     f:SetBackdrop({
@@ -238,7 +271,7 @@ local function CreateBar(index)
     f.fill:SetPoint("BOTTOMLEFT", 3, 3)
     f.fill:SetPoint("BOTTOMRIGHT", -3, 3)
     f.fill:SetHeight(1)
-    f.fill:SetColorTexture(0.55, 0.2, 0.95, 1)
+    f.fill:SetColorTexture(0.15, 1.0, 0.18, 1)
 
     f.topText = f:CreateFontString(nil, "OVERLAY")
     f.topText:SetFont("Fonts\\FRIZQT__.TTF", 15, "OUTLINE")
@@ -246,13 +279,12 @@ local function CreateBar(index)
     f.topText:SetTextColor(1, 1, 1)
 
     f.bottomText = f:CreateFontString(nil, "OVERLAY")
-    f.bottomText:SetFont("Fonts\\FRIZQT__.TTF", 16, "OUTLINE")
-    f.bottomText:SetWidth(db.barWidth - 6)
+    f.bottomText:SetFont("Fonts\\FRIZQT__.TTF", 12, "OUTLINE")
+    f.bottomText:SetWidth((db and db.barWidth or 25) - 4)
     f.bottomText:SetJustifyH("CENTER")
-    f.bottomText:SetPoint("BOTTOM", 0, 8)
+    f.bottomText:SetPoint("BOTTOM", f, "BOTTOM", 0, 4)
     f.bottomText:SetTextColor(1, 0.95, 0.85)
 
-    f.index = index
     barFrames[index] = f
     return f
 end
@@ -265,7 +297,7 @@ local function UpdateContainerSize()
     local oldLeft = mainFrame:GetLeft()
     local oldTop = mainFrame:GetTop()
 
-    local visibleBars = math.max(#activeImps, 1)
+    local visibleBars = math.max(#activeGroups, 1)
     local barsWidth = (visibleBars * db.barWidth) + ((visibleBars - 1) * db.barGap)
     local leftColumnWidth = 64
     local totalWidth = leftColumnWidth + barsWidth + 20
@@ -275,9 +307,13 @@ local function UpdateContainerSize()
     barsAnchor:ClearAllPoints()
     barsAnchor:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", leftColumnWidth, -40)
 
+    totalCountText:SetFont("Fonts\\FRIZQT__.TTF", db.totalFontSize or 34, "OUTLINE")
+    totalCountText:SetTextColor(db.totalTextColor.r, db.totalTextColor.g, db.totalTextColor.b, db.totalTextColor.a)
     totalCountText:ClearAllPoints()
     totalCountText:SetPoint("RIGHT", barsAnchor, "LEFT", -14, 0)
 
+    totalLabel:SetFont("Fonts\\FRIZQT__.TTF", db.labelFontSize or 12, "OUTLINE")
+    totalLabel:SetTextColor(db.labelTextColor.r, db.labelTextColor.g, db.labelTextColor.b, db.labelTextColor.a)
     totalLabel:ClearAllPoints()
     totalLabel:SetPoint("TOP", totalCountText, "BOTTOM", 0, -2)
 
@@ -290,34 +326,43 @@ local function UpdateContainerSize()
         mainFrame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", oldLeft, oldTop)
     end
 
-    if db.showBackground then
-        mainFrame:SetBackdropColor(0, 0, 0, 0.55)
-        mainFrame:SetBackdropBorderColor(0.45, 0.3, 0.8, 0.95)
-    else
-        mainFrame:SetBackdropColor(0, 0, 0, 0)
-        mainFrame:SetBackdropBorderColor(0, 0, 0, 0)
-    end
-
+    UpdateBackdrop()
     mainFrame:EnableMouse(not db.locked)
 end
 
 local function LayoutBars()
-    for i = 1, math.max(#activeImps, #barFrames) do
+    for i = 1, math.max(#activeGroups, #barFrames) do
         local bar = GetBar(i)
         bar:SetSize(db.barWidth, db.barHeight)
+        if bar.topText then
+            bar.topText:SetFont("Fonts\\FRIZQT__.TTF", db.timerFontSize or 15, "OUTLINE")
+            bar.topText:SetTextColor(db.timerTextColor.r, db.timerTextColor.g, db.timerTextColor.b, db.timerTextColor.a)
+        end
         if bar.bottomText then
-            bar.bottomText:SetWidth(db.barWidth - 6)
+            bar.bottomText:SetFont("Fonts\\FRIZQT__.TTF", db.castFontSize or 12, "OUTLINE")
+            bar.bottomText:SetTextColor(db.castTextColor.r, db.castTextColor.g, db.castTextColor.b, db.castTextColor.a)
+            bar.bottomText:SetWidth(db.barWidth - 4)
         end
         bar:ClearAllPoints()
         bar:SetPoint("TOPLEFT", (i - 1) * (db.barWidth + db.barGap), 0)
     end
 end
 
+local function ApplyBarColors(bar, group)
+    if group and group.isBoss then
+        bar.fill:SetColorTexture(db.bossFillColor.r, db.bossFillColor.g, db.bossFillColor.b, db.bossFillColor.a)
+        bar:SetBackdropBorderColor(db.bossBorderColor.r, db.bossBorderColor.g, db.bossBorderColor.b, db.bossBorderColor.a)
+    else
+        bar.fill:SetColorTexture(db.normalFillColor.r, db.normalFillColor.g, db.normalFillColor.b, db.normalFillColor.a)
+        bar:SetBackdropBorderColor(db.normalBorderColor.r, db.normalBorderColor.g, db.normalBorderColor.b, db.normalBorderColor.a)
+    end
+end
+
 local function RefreshDisplay()
     local now = GetTime()
-    totalCountText:SetText(tostring(#activeImps))
+    totalCountText:SetText(tostring(GetTotalImpCount()))
 
-    SortImpIndicesByRemainingDurationAscending(now)
+    SortGroupIndicesByRemainingDurationAscending(now)
     UpdateContainerSize()
     LayoutBars()
 
@@ -325,26 +370,19 @@ local function RefreshDisplay()
         barFrames[i]:Hide()
     end
 
-    for visualIndex, impIndex in ipairs(displayOrder) do
-        local imp = activeImps[impIndex]
+    for visualIndex, groupIndex in ipairs(displayOrder) do
+        local group = activeGroups[groupIndex]
         local bar = GetBar(visualIndex)
-        local remaining = RemainingTime(imp, now)
-        local casts = RemainingCasts(imp)
-        local maxCasts = GetMaxCasts(imp)
+        local remaining = RemainingTime(group, now)
+        local casts = RemainingCasts(group)
+        local maxCasts = GetMaxCasts(group)
         local fillHeight = 1
 
         if maxCasts > 0 then
             fillHeight = math.max(1, math.floor((casts / maxCasts) * (db.barHeight - 6)))
         end
 
-        if imp.isBoss then
-            bar.fill:SetColorTexture(1.0, 0.18, 0.05, 1)
-            bar:SetBackdropBorderColor(1.0, 0.42, 0.12, 1)
-        else
-            bar.fill:SetColorTexture(0.15, 1.0, 0.18, 1)
-            bar:SetBackdropBorderColor(0.35, 0.85, 0.35, 1)
-        end
-
+        ApplyBarColors(bar, group)
         bar.fill:SetHeight(fillHeight)
         bar.topText:SetText(string.format("%d", math.ceil(remaining)))
         bar.bottomText:SetText(string.format("%d", casts))
@@ -352,27 +390,259 @@ local function RefreshDisplay()
     end
 end
 
+local function RevertToDefaults()
+    wipe(db)
+    CopyDefaults(defaults, db)
+    print("|cff9d7dffWild Imp Tracker:|r All settings reverted to defaults.")
+    mainFrame:ClearAllPoints()
+    mainFrame:SetPoint("TOPLEFT", UIParent, "TOPLEFT", 0, -150)
+    SaveFramePosition()
+    UpdateContainerSize()
+    RefreshDisplay()
+end
+
+local AceConfig = LibStub("AceConfig-3.0", true)
+local AceConfigDialog = LibStub("AceConfigDialog-3.0", true)
+
+local function GetOptionsTable()
+    return {
+        type = "group",
+        name = "Wild Imp Tracker",
+        args = {
+            basicGroup = {
+                type = "group",
+                name = "Basic Settings",
+                inline = true,
+                order = 10,
+                args = {
+                    locked = {
+                        type = "toggle", name = "Lock Frame",
+                        get = function() return db.locked end,
+                        set = function(_, v) db.locked = v; mainFrame:EnableMouse(not v); UpdateContainerSize() end,
+                        order = 1,
+                    },
+                    showBackground = {
+                        type = "toggle", name = "Show Background",
+                        get = function() return db.showBackground end,
+                        set = function(_, v) db.showBackground = v; UpdateBackdrop() end,
+                        order = 2,
+                    },
+                    bgColor = {
+                        type = "color", name = "Background Color", hasAlpha = true,
+                        get = function() return db.bgColor.r, db.bgColor.g, db.bgColor.b, db.bgColor.a end,
+                        set = function(_, r, g, b, a) db.bgColor = { r = r, g = g, b = b, a = a }; UpdateBackdrop() end,
+                        order = 3,
+                    },
+                    scale = {
+                        type = "range", name = "Scale", min = 0.4, max = 3.0, step = 0.05,
+                        get = function() return db.scale end,
+                        set = function(_, v) db.scale = v; UpdateContainerSize(); RefreshDisplay() end,
+                        order = 4,
+                    },
+                    alpha = {
+                        type = "range", name = "Alpha", min = 0.1, max = 1.0, step = 0.01,
+                        get = function() return db.alpha end,
+                        set = function(_, v) db.alpha = v; UpdateContainerSize() end,
+                        order = 5,
+                    },
+                },
+            },
+            barsGroup = {
+                type = "group",
+                name = "Bars",
+                inline = true,
+                order = 20,
+                args = {
+                    barWidth = {
+                        type = "range", name = "Bar Width", min = 16, max = 80, step = 1,
+                        get = function() return db.barWidth end,
+                        set = function(_, v) db.barWidth = v; RefreshDisplay() end,
+                        order = 1,
+                    },
+                    barHeight = {
+                        type = "range", name = "Bar Height", min = 50, max = 180, step = 1,
+                        get = function() return db.barHeight end,
+                        set = function(_, v) db.barHeight = v; RefreshDisplay() end,
+                        order = 2,
+                    },
+                    barGap = {
+                        type = "range", name = "Bar Gap", min = 0, max = 20, step = 1,
+                        get = function() return db.barGap end,
+                        set = function(_, v) db.barGap = v; RefreshDisplay() end,
+                        order = 3,
+                    },
+                    normalFillColor = {
+                        type = "color", name = "Normal Imp Fill", hasAlpha = true,
+                        get = function() return db.normalFillColor.r, db.normalFillColor.g, db.normalFillColor.b, db.normalFillColor.a end,
+                        set = function(_, r, g, b, a) db.normalFillColor = { r = r, g = g, b = b, a = a }; RefreshDisplay() end,
+                        order = 4,
+                    },
+                    normalBorderColor = {
+                        type = "color", name = "Normal Imp Border", hasAlpha = true,
+                        get = function() return db.normalBorderColor.r, db.normalBorderColor.g, db.normalBorderColor.b, db.normalBorderColor.a end,
+                        set = function(_, r, g, b, a) db.normalBorderColor = { r = r, g = g, b = b, a = a }; RefreshDisplay() end,
+                        order = 5,
+                    },
+                    bossFillColor = {
+                        type = "color", name = "Imp Gang Boss Fill", hasAlpha = true,
+                        get = function() return db.bossFillColor.r, db.bossFillColor.g, db.bossFillColor.b, db.bossFillColor.a end,
+                        set = function(_, r, g, b, a) db.bossFillColor = { r = r, g = g, b = b, a = a }; RefreshDisplay() end,
+                        order = 6,
+                    },
+                    bossBorderColor = {
+                        type = "color", name = "Imp Gang Boss Border", hasAlpha = true,
+                        get = function() return db.bossBorderColor.r, db.bossBorderColor.g, db.bossBorderColor.b, db.bossBorderColor.a end,
+                        set = function(_, r, g, b, a) db.bossBorderColor = { r = r, g = g, b = b, a = a }; RefreshDisplay() end,
+                        order = 7,
+                    },
+                },
+            },
+            textGroup = {
+                type = "group",
+                name = "Text",
+                inline = true,
+                order = 30,
+                args = {
+                    totalFontSize = {
+                        type = "range", name = "Total Imps Font Size", min = 18, max = 60, step = 1,
+                        get = function() return db.totalFontSize end,
+                        set = function(_, v) db.totalFontSize = v; RefreshDisplay() end,
+                        order = 1,
+                    },
+                    timerFontSize = {
+                        type = "range", name = "Duration Font Size", min = 8, max = 30, step = 1,
+                        get = function() return db.timerFontSize end,
+                        set = function(_, v) db.timerFontSize = v; RefreshDisplay() end,
+                        order = 2,
+                    },
+                    castFontSize = {
+                        type = "range", name = "Casts Font Size", min = 8, max = 30, step = 1,
+                        get = function() return db.castFontSize end,
+                        set = function(_, v) db.castFontSize = v; RefreshDisplay() end,
+                        order = 3,
+                    },
+                    labelFontSize = {
+                        type = "range", name = "Label Font Size", min = 8, max = 30, step = 1,
+                        get = function() return db.labelFontSize end,
+                        set = function(_, v) db.labelFontSize = v; RefreshDisplay() end,
+                        order = 4,
+                    },
+                    totalTextColor = {
+                        type = "color", name = "Total Imps Color", hasAlpha = true,
+                        get = function() return db.totalTextColor.r, db.totalTextColor.g, db.totalTextColor.b, db.totalTextColor.a end,
+                        set = function(_, r, g, b, a) db.totalTextColor = { r = r, g = g, b = b, a = a }; RefreshDisplay() end,
+                        order = 5,
+                    },
+                    labelTextColor = {
+                        type = "color", name = "Label Color", hasAlpha = true,
+                        get = function() return db.labelTextColor.r, db.labelTextColor.g, db.labelTextColor.b, db.labelTextColor.a end,
+                        set = function(_, r, g, b, a) db.labelTextColor = { r = r, g = g, b = b, a = a }; RefreshDisplay() end,
+                        order = 6,
+                    },
+                    timerTextColor = {
+                        type = "color", name = "Duration Text Color", hasAlpha = true,
+                        get = function() return db.timerTextColor.r, db.timerTextColor.g, db.timerTextColor.b, db.timerTextColor.a end,
+                        set = function(_, r, g, b, a) db.timerTextColor = { r = r, g = g, b = b, a = a }; RefreshDisplay() end,
+                        order = 7,
+                    },
+                    castTextColor = {
+                        type = "color", name = "Casts Text Color", hasAlpha = true,
+                        get = function() return db.castTextColor.r, db.castTextColor.g, db.castTextColor.b, db.castTextColor.a end,
+                        set = function(_, r, g, b, a) db.castTextColor = { r = r, g = g, b = b, a = a }; RefreshDisplay() end,
+                        order = 8,
+                    },
+                },
+            },
+            profilesGroup = {
+                type = "group",
+                name = "Profiles",
+                inline = true,
+                order = 40,
+                args = {
+                    revert = {
+                        type = "execute",
+                        name = "Revert to Defaults",
+                        desc = "Reset all settings to original default values.",
+                        func = function()
+                            StaticPopupDialogs["WILDIMPTRACKER_REVERT"] = {
+                                text = "Revert all settings to defaults?\nThis cannot be undone.",
+                                button1 = "Yes, Reset",
+                                button2 = "Cancel",
+                                OnAccept = function() RevertToDefaults() end,
+                                showAlert = true,
+                                preferredIndex = 3,
+                                timeout = 0,
+                                whileDead = true,
+                                hideOnEscape = true,
+                            }
+                            StaticPopup_Show("WILDIMPTRACKER_REVERT")
+                        end,
+                        order = 1,
+                    },
+                },
+            },
+            testGroup = {
+                type = "group",
+                name = "Test Actions",
+                inline = true,
+                order = 50,
+                args = {
+                    testHog = {
+                        type = "execute",
+                        name = "Test Hand of Gul'dan",
+                        func = function() AddHandOfGuldanGroup(); RefreshDisplay() end,
+                        order = 1,
+                    },
+                    testImplode = {
+                        type = "execute",
+                        name = "Test Implosion",
+                        func = function() ImplodeGroups(); RefreshDisplay() end,
+                        order = 2,
+                    },
+                    clear = {
+                        type = "execute",
+                        name = "Clear Imps",
+                        func = function() wipe(activeGroups); RefreshDisplay() end,
+                        order = 3,
+                    },
+                },
+            },
+        },
+    }
+end
+
 local function PrintHelp()
-    print("|cff9d7dffImp Tracker Reskin:|r /wit lock | unlock | scale <n> | alpha <n> | width <n> | height <n> | gap <n>")
-    print("|cff9d7dffImp Tracker Reskin:|r /wit talent | test | implode | clear | bg on | bg off")
+    print("|cff9d7dffWild Imp Tracker:|r /wit opens options. Commands: lock | unlock | scale <n> | alpha <n> | width <n> | height <n> | gap <n>")
+    print("|cff9d7dffWild Imp Tracker:|r /wit talent | test | implode | clear | bg on | bg off")
 end
 
 SLASH_WILDIMPTRACKER1 = "/wit"
 SLASH_WILDIMPTRACKER2 = "/itr"
 SlashCmdList["WILDIMPTRACKER"] = function(msg)
     EnsureDB()
-    local cmd, arg1, arg2 = msg:match("^(%S*)%s*(%S*)%s*(.-)$")
+    msg = (msg or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if msg == "" then
+        if AceConfigDialog then
+            AceConfigDialog:Open(ADDON_NAME)
+        else
+            PrintHelp()
+            print("|cff9d7dffWild Imp Tracker:|r Options panel requires Ace3.")
+        end
+        return
+    end
+
+    local cmd, arg1 = msg:match("^(%S*)%s*(.-)$")
     cmd = string.lower(cmd or "")
     arg1 = string.lower(arg1 or "")
 
     if cmd == "lock" then
         db.locked = true
         UpdateContainerSize()
-        print("|cff9d7dffImp Tracker Reskin:|r Locked.")
+        print("|cff9d7dffWild Imp Tracker:|r Locked.")
     elseif cmd == "unlock" then
         db.locked = false
         UpdateContainerSize()
-        print("|cff9d7dffImp Tracker Reskin:|r Unlocked.")
+        print("|cff9d7dffWild Imp Tracker:|r Unlocked.")
     elseif cmd == "scale" then
         local n = tonumber(arg1)
         if n then
@@ -413,20 +683,20 @@ SlashCmdList["WILDIMPTRACKER"] = function(msg)
             UpdateContainerSize()
         end
     elseif cmd == "talent" then
-        print("|cff9d7dffImp Tracker Reskin:|r Imp Gang Boss = " .. tostring(HasImpGangBossTalent()))
-        print("|cff9d7dffImp Tracker Reskin:|r To Hell and Back = " .. tostring(HasToHellAndBackTalent()))
+        print("|cff9d7dffWild Imp Tracker:|r Imp Gang Boss = " .. tostring(HasImpGangBossTalent()))
+        print("|cff9d7dffWild Imp Tracker:|r To Hell and Back = " .. tostring(HasToHellAndBackTalent()))
     elseif cmd == "test" then
-        AddHandOfGuldanImps()
+        AddHandOfGuldanGroup()
         RefreshDisplay()
-        print("|cff9d7dffImp Tracker Reskin:|r Added test Hand of Gul'dan imps.")
+        print("|cff9d7dffWild Imp Tracker:|r Added grouped Hand of Gul'dan imps.")
     elseif cmd == "implode" then
-        ImplodeImps()
+        ImplodeGroups()
         RefreshDisplay()
-        print("|cff9d7dffImp Tracker Reskin:|r Simulated Implosion.")
+        print("|cff9d7dffWild Imp Tracker:|r Simulated Implosion.")
     elseif cmd == "clear" then
-        wipe(activeImps)
+        wipe(activeGroups)
         RefreshDisplay()
-        print("|cff9d7dffImp Tracker Reskin:|r Cleared active imps.")
+        print("|cff9d7dffWild Imp Tracker:|r Cleared active imp groups.")
     else
         PrintHelp()
     end
@@ -438,12 +708,21 @@ mainFrame:RegisterEvent("PLAYER_LOGOUT")
 mainFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
 mainFrame:RegisterEvent("TRAIT_CONFIG_UPDATED")
 mainFrame:RegisterEvent("PLAYER_TALENT_UPDATE")
+mainFrame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
 
 mainFrame:SetScript("OnEvent", function(_, event, ...)
     if event == "ADDON_LOADED" then
         local addonName = ...
         if addonName ~= ADDON_NAME then return end
         EnsureDB()
+
+        if AceConfig then
+            AceConfig:RegisterOptionsTable(ADDON_NAME, GetOptionsTable)
+            if AceConfigDialog then
+                AceConfigDialog:AddToBlizOptions(ADDON_NAME, "Wild Imp Tracker")
+            end
+        end
+
         mainFrame:ClearAllPoints()
         if db.anchor == "TOPLEFT" then
             mainFrame:SetPoint("TOPLEFT", UIParent, "TOPLEFT", db.x or 0, db.y or -150)
@@ -453,25 +732,39 @@ mainFrame:SetScript("OnEvent", function(_, event, ...)
             mainFrame:ClearAllPoints()
             mainFrame:SetPoint("TOPLEFT", UIParent, "TOPLEFT", db.x or 0, db.y or -150)
         end
+        UpdateBackdrop()
         UpdateContainerSize()
         RefreshDisplay()
     elseif event == "PLAYER_ENTERING_WORLD" then
         EnsureDB()
+        if not IsDemonology() then
+            mainFrame:Hide()
+            return
+        else
+            mainFrame:Show()
+        end
         lastUpdate = GetTime()
         RefreshDisplay()
     elseif event == "PLAYER_LOGOUT" then
         EnsureDB()
         SaveFramePosition()
+    elseif event == "PLAYER_SPECIALIZATION_CHANGED" then
+        if IsDemonology() then
+            mainFrame:Show()
+            RefreshDisplay()
+        else
+            mainFrame:Hide()
+        end
     elseif event == "TRAIT_CONFIG_UPDATED" or event == "PLAYER_TALENT_UPDATE" then
         RefreshDisplay()
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
         local unit, _, spellID = ...
         if unit ~= "player" then return end
         if spellID == HAND_OF_GULDAN_SPELL_ID then
-            AddHandOfGuldanImps()
+            AddHandOfGuldanGroup()
             RefreshDisplay()
         elseif spellID == IMPLOSION_SPELL_ID then
-            ImplodeImps()
+            ImplodeGroups()
             RefreshDisplay()
         end
     end
@@ -486,13 +779,13 @@ C_Timer.NewTicker(0.05, function()
 
     local haste = 1 + ((GetHaste() or 0) / 100)
 
-    for i = #activeImps, 1, -1 do
-        local imp = activeImps[i]
+    for i = #activeGroups, 1, -1 do
+        local group = activeGroups[i]
         if UnitAffectingCombat("player") then
-            imp.energy = imp.energy - (DECAY_BASE * haste * dt)
+            group.energy = group.energy - (DECAY_BASE * haste * dt)
         end
-        if RemainingTime(imp, now) <= 0 or imp.energy <= 0 then
-            table.remove(activeImps, i)
+        if RemainingTime(group, now) <= 0 or group.energy <= 0 or group.count <= 0 then
+            table.remove(activeGroups, i)
         end
     end
 
