@@ -1,10 +1,11 @@
 local ADDON_NAME = ...
 
 local function IsDemonology()
-    local spec = GetSpecialization()
+    local _, class = UnitClass("player")
+    if class ~= "WARLOCK" then return false end
+	local spec = GetSpecialization()
     return spec == 2
 end
-
 
 local HAND_OF_GULDAN_SPELL_ID = 105174
 local IMPLOSION_SPELL_ID = 196277
