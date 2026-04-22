@@ -15,9 +15,14 @@ local TO_HELL_AND_BACK_TALENT_ID = 1281511
 local IMP_DURATION = 40
 local START_ENERGY = 100
 local DECAY_BASE = 7.5
+local cachedHaste = 1.0  -- populated at login; GetHaste() is secret in combat
 local MAX_GROUPS = 20
 local MAX_CASTS_NORMAL = 6
 local MAX_CASTS_BOSS = 6
+-- Base Fel Firebolt cast time in seconds (at 0% haste).
+-- GetHaste() is a secret value in 12.0.5+ so we derive remaining
+-- casts purely from remaining lifetime instead of energy drain.
+local FIREBOLT_CAST_TIME = 2.0
 
 local FRAME_BG_DEFAULT = { r = 0, g = 0, b = 0, a = 0.55 }
 local TOTAL_TEXT_DEFAULT = { r = 0.75, g = 0.85, b = 1.0, a = 1 }
@@ -744,6 +749,10 @@ mainFrame:SetScript("OnEvent", function(_, event, ...)
         else
             mainFrame:Show()
         end
+        -- GetHaste() is not secret at this point (untainted, out of combat).
+        -- Cache it here so the ticker can use it without touching secret values.
+        local h = GetHaste()
+        if h then cachedHaste = 1 + (h / 100) end
         lastUpdate = GetTime()
         RefreshDisplay()
     elseif event == "PLAYER_LOGOUT" then
@@ -757,6 +766,8 @@ mainFrame:SetScript("OnEvent", function(_, event, ...)
             mainFrame:Hide()
         end
     elseif event == "TRAIT_CONFIG_UPDATED" or event == "PLAYER_TALENT_UPDATE" then
+        local h = GetHaste()
+        if h then cachedHaste = 1 + (h / 100) end
         RefreshDisplay()
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
         local unit, _, spellID = ...
@@ -778,12 +789,13 @@ C_Timer.NewTicker(0.05, function()
     local dt = now - lastUpdate
     lastUpdate = now
 
-    local haste = 1 + ((GetHaste() or 0) / 100)
-
+    -- cachedHaste is captured at login/zone-in/talent-change (untainted, out of combat).
+    -- GetHaste() itself is a secret value when called from tainted code in 12.0.5+,
+    -- so we never call it here inside the ticker.
     for i = #activeGroups, 1, -1 do
         local group = activeGroups[i]
         if UnitAffectingCombat("player") then
-            group.energy = group.energy - (DECAY_BASE * haste * dt)
+            group.energy = group.energy - (DECAY_BASE * cachedHaste * dt)
         end
         if RemainingTime(group, now) <= 0 or group.energy <= 0 or group.count <= 0 then
             table.remove(activeGroups, i)
