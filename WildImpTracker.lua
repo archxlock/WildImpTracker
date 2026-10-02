@@ -8,6 +8,7 @@ local function IsDemonology()
 end
 
 local HAND_OF_GULDAN_SPELL_ID = 105174
+local RUINATION_SPELL_ID = 434635
 local IMPLOSION_SPELL_ID = 196277
 local IMP_GANG_BOSS_TALENT_ID = 1250768
 local TO_HELL_AND_BACK_TALENT_ID = 1281511
@@ -772,7 +773,7 @@ mainFrame:SetScript("OnEvent", function(_, event, ...)
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
         local unit, _, spellID = ...
         if unit ~= "player" then return end
-        if spellID == HAND_OF_GULDAN_SPELL_ID then
+        if (spellID == HAND_OF_GULDAN_SPELL_ID) or (spellID == RUINATION_SPELL_ID) then
             AddHandOfGuldanGroup()
             RefreshDisplay()
         elseif spellID == IMPLOSION_SPELL_ID then
